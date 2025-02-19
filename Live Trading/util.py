@@ -1,5 +1,8 @@
 # util.py
 import requests
+import pandas as pd
+from datetime import datetime
+import numpy as np
 def get_layer1_universe():
         """
         Retrieve the list of Layer 1 assets from the TWSQ API.
@@ -51,3 +54,27 @@ def get_layer1_universe():
 
             page += 1
         return coin_ticker
+def corr_with_btc(port_ret):
+    bitcoin_data_path = '../bitcoin_data.pkl'
+    # Load the Bitcoin data
+    bitcoin_data = pd.read_pickle(bitcoin_data_path)
+
+
+
+    bitcoin_data['open_time'] = pd.to_datetime(bitcoin_data['open_time'])
+
+    if bitcoin_data['open_time'].dt.tz is not None:
+        bitcoin_data['open_time'] = bitcoin_data['open_time'].dt.tz_localize(None)
+
+    bitcoin_data.set_index('open_time', inplace=True)
+    if isinstance(port_ret.index, pd.DatetimeIndex):
+        port_ret.index = port_ret.index.tz_localize(None)
+
+    # Now perform correlation safely
+    btc_returns = pd.to_numeric(bitcoin_data['close'], errors='coerce').pct_change().dropna()
+    port_ret_clean = port_ret.dropna()
+
+    # Align indices and compute correlation
+    aligned_data = port_ret_clean.align(btc_returns, join='inner')
+    corr = aligned_data[0].corr(aligned_data[1])
+    return corr
