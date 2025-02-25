@@ -78,3 +78,34 @@ def corr_with_btc(port_ret):
     aligned_data = port_ret_clean.align(btc_returns, join='inner')
     corr = aligned_data[0].corr(aligned_data[1])
     return corr
+
+def to_sharpe(weightings, ret, th = 1, to_off = False, plot = True, return_ret = False):
+        weightings = weightings.iloc[::th].fillna(0)
+        # ret_prod = (1+ret).cumprod()
+        # ret = ret_prod.divide(ret_prod.shift(th), axis = 0) - 1
+        ret = ret.rolling(th).sum()
+        ret = ret[::th].fillna(0)
+        to = weightings.diff().abs().sum(1)
+        matching_columns = weightings.columns.intersection(ret.columns)
+        weightings_ret = weightings[matching_columns].shift(1) * ret[matching_columns]
+        port_ret = weightings_ret.sum(1)
+        bps = .0026
+        if to_off:
+            bps = 0
+        port_ret = port_ret - bps * to
+        if return_ret:
+            return port_ret,to, ret, weightings
+        avg_to = to.mean()
+        sharpe = np.sqrt(24*365/th) * port_ret.mean() / port_ret.std()
+        drawdown = port_ret.cumsum().cummax() - port_ret.cumsum()
+        max_drawdown = drawdown.max()
+        drawdown_durations = (drawdown > 0).cumsum()
+        durations = drawdown_durations.groupby(drawdown_durations).cumcount()
+        max_drawdown_duration = durations.max()*th/24
+        if plot:
+            if 'BTCUSDT' in ret.columns:
+                print("Corr with BTC: ", port_ret.corr(ret['BTCUSDT']))
+            print("Average Turnover: ", avg_to)
+            print("Sharpe Ratio: ", sharpe)
+            port_ret.cumsum().plot()
+        return avg_to, sharpe, max_drawdown, max_drawdown_duration
