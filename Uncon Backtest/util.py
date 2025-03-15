@@ -8,8 +8,41 @@ import numpy as np
 load_dotenv()
 data_path = '../Data/'
 COINGECKO_API = os.getenv("COINGECKO_API_KEY")
+KRAKEN_API = os.getenv('KRAKEN_API_KEY')
 HEADERS = {"x-cg-pro-api-key": COINGECKO_API,
            "accept": "application/json"}
+KRAKEN_HEADER = {
+  'Accept': 'application/json'
+}
+def get_tradable_kraken_coins(volume = 100000):
+    filepath = data_path + 'tradable_kraken_coins.pkl'
+    tradable_coins = []
+    if os.path.exists(filepath):
+        with open(filepath, 'rb') as f:
+            tradable_coins = pickle.load(f)
+        return tradable_coins
+    url = "https://api.kraken.com/0/public/AssetPairs"
+    all_coins = get_exchange_coins(exchange = 'kraken', volume_threshold = volume)
+    for coin in all_coins:
+        payload={}
+        if coin['target'] == 'USD':
+            params = {
+                "pair": coin['base'] + '/USD',
+                "country_code": "US",
+            }
+            tradable_coins.append(coin['base'])
+            try:
+                resp = requests.request("GET", url, headers=KRAKEN_HEADER, params = params, data=payload)
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                print(f"Error fetching tradable coins: {e}")
+            if payload:
+                tradable_coins.append(coin['base'])
+    with open(filepath, 'wb') as f:
+        pickle.dump(tradable_coins, f)
+    return tradable_coins
+            
+    
 def get_all_coin_names():
     filepath = data_path + 'all_coin_names.pkl'
     if os.path.exists(filepath):
@@ -60,7 +93,29 @@ def get_exchange_coins(exchange = 'kraken', volume_threshold = 100000):
     except requests.RequestException as e:
         print(f"Error fetching exchange coins: {e}")
     return all_coins
-    
+def rolling_mad_df(df, window):
+    arr = df.to_numpy()
+    T, N = arr.shape
+    arr_T = arr.T
+    windows = np.lib.stride_tricks.sliding_window_view(arr_T, window_shape=window, axis=1)
+    medians = np.median(windows, axis=2)
+    abs_dev = np.abs(windows - medians[:, :, None])
+    mad = np.median(abs_dev, axis=2)
+    mad = mad.T
+    mad_full = np.full((T, N), np.nan)
+    mad_full[window - 1:, :] = mad
+    mad_df = pd.DataFrame(mad_full, index=df.index, columns=df.columns)
+    return mad_df
+
+def modify_extreme_ret(ret):
+    # Modify extreme returns
+    ret = np.log1p(ret)
+    rolling_window = 12
+    rollingmedian = ret.rolling(rolling_window, min_periods=1).median()
+    rollingmad = rolling_mad_df(ret, rolling_window)
+    outlier = abs(ret-rollingmedian) > 15*rollingmad
+    ret=ret.where(~outlier, rollingmedian)
+    return np.expm1(ret)
 
 def get_all_ochl():
     file_path=data_path + 'all_ochl.pkl'
@@ -79,30 +134,29 @@ def get_all_ochl():
 
 
 def transform_returns(df = None, volume_threshold = 10000):
-    # Ensure that the time column is in datetime format and set it as the index
     if df is None:
         df = get_all_ochl()
     df = df.rename(columns={'time_rank':'date'})
-    # Ensure DataFrame is sorted by symbol and date.
     df = df.drop_duplicates(subset=['symbol', 'date'], keep='last')
     df = df.sort_values(by=['symbol', 'date'])
     
-    # Compute returns using the 'close' price.
     df['return'] = df.groupby('symbol')['close'].pct_change()
     
-    # Mask returns where volume is less than threshold.
     df.loc[df['volume'] < volume_threshold, 'return'] = np.nan
     
-    # Use pivot_table to aggregate duplicate date-symbol pairs (using the last available value)
     returns_df = df.pivot_table(index='date', columns='symbol', values='return', aggfunc='last')
+    min_date = returns_df.index.min()
+    max_date = returns_df.index.max()
+    full_date_range = pd.date_range(start=min_date, end=max_date, freq='h')
+    returns_df = returns_df.reindex(full_date_range, fill_value=0)
     return returns_df
 
 def get_all_returns(volume_threshold = 10000):
     file_path=data_path + f'all_returns_{volume_threshold}.pkl'
     try:
         with open(file_path, 'rb') as f:
-            layer1_returns = pickle.load(f)
-        return layer1_returns
+            all_returns = pickle.load(f)
+        return all_returns
     except FileNotFoundError:
         print("File not found. Fetching from database.")
         ret = transform_returns(volume_threshold = volume_threshold)
@@ -110,33 +164,45 @@ def get_all_returns(volume_threshold = 10000):
             pickle.dump(ret, f)
         return ret
 
-def get_all_prices(type = 'close'):
-    file_path=data_path + f'all_prices_{type}.pkl'
-    if os.path.exists(file_path):
+def get_col_pivot_from_all_ochl(type = 'close', volume_threshold = 10000):
+    # transform ochl to pivot table of one column, e.g. close, high, low, open
+    # Ensure that the time column is in datetime format and set it as the index
+    file_path=data_path + f'all_{type}_{volume_threshold}.pkl'
+    try:
         with open(file_path, 'rb') as f:
-            layer1_prices = pickle.load(f)
-        return layer1_prices
-    conn = sqlite3.connect(data_path + "crypto_data.db")
-    query = "SELECT time_rank, coin_id, symbol, name, open, high, low, close, volume, market_cap FROM coin_history"
-    df = pd.read_sql_query(query, conn)
-    df['time_rank'] = pd.to_datetime(df['time_rank'])-pd.Timedelta(hours=1)
+            all_prices = pickle.load(f)
+        return all_prices
+    except FileNotFoundError:
+        print("File not found. Fetching from database.")
+        all_ochl = get_all_ochl()
+        all_prices = transform_col(all_ochl, type = type, volume_threshold = volume_threshold)
+        min_date = all_prices.index.min()
+        max_date = all_prices.index.max()
+        full_date_range = pd.date_range(start=min_date, end=max_date, freq='h')
+        all_prices = all_prices.reindex(full_date_range)
+        with open(file_path, 'wb') as f:
+            pickle.dump(all_prices, f)
+        return all_prices
+    
+def transform_col(df = None, type = 'close', volume_threshold = 10000):
+    if df is None:
+        df = get_all_ochl()
     df = df.rename(columns={'time_rank':'date'})
     df = df.drop_duplicates(subset=['symbol', 'date'], keep='last')
     df = df.sort_values(by=['symbol', 'date'])
-    prices_df = df.pivot_table(index='date', columns='symbol', values=type)
-    with open(file_path, 'wb') as f:
-        pickle.dump(prices_df, f)
-    return prices_df
+    df.loc[df['volume'] < volume_threshold, type] = np.nan
     
-
+    # Use pivot_table to aggregate duplicate date-symbol pairs (using the last available value)
+    prices_df = df.pivot_table(index='date', columns='symbol', values=type, aggfunc='last')
+    return prices_df
       
       
 def get_coins_from_category(category = 'layer-1',vs_currency="usd"):
     file_path = data_path + f'{category}_coins.pkl'
     try:
         with open(file_path, 'rb') as f:
-            layer1_coins = pickle.load(f)
-        return layer1_coins
+           coins = pickle.load(f)
+        return coins
     except FileNotFoundError:
         print("File not found. Fetching from database.")
         all_coins = fetch_coins_from_category(category,vs_currency)
@@ -214,10 +280,14 @@ def to_sharpe(weightings, ret, th = 1, to_off = False, plot = False, return_ret 
         if to_off:
             bps = 0
         port_ret = port_ret - bps * to
-        if purify:
+        if purify and 'btc' in ret.columns:
+            if plot:
+                print("Corr with BTC (before purification): ", port_ret.corr(ret['btc']))
             port_ret, beta = purify_ret(port_ret, ret['btc'])
+            if plot:
+                print("BTC Beta: ", beta.mean())
         if return_ret:
-            return port_ret,to, ret, weightings
+            return port_ret
         avg_to = to.mean()
         sharpe = np.sqrt(24*365/th) * port_ret.mean() / port_ret.std()
         cum_port_ret = port_ret.cumsum()
