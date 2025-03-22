@@ -93,29 +93,44 @@ def get_exchange_coins(exchange = 'kraken', volume_threshold = 100000):
     except requests.RequestException as e:
         print(f"Error fetching exchange coins: {e}")
     return all_coins
-def rolling_mad_df(df, window):
-    arr = df.to_numpy()
-    T, N = arr.shape
-    arr_T = arr.T
-    windows = np.lib.stride_tricks.sliding_window_view(arr_T, window_shape=window, axis=1)
-    medians = np.median(windows, axis=2)
-    abs_dev = np.abs(windows - medians[:, :, None])
-    mad = np.median(abs_dev, axis=2)
-    mad = mad.T
-    mad_full = np.full((T, N), np.nan)
-    mad_full[window - 1:, :] = mad
-    mad_df = pd.DataFrame(mad_full, index=df.index, columns=df.columns)
-    return mad_df
+# def rolling_mad_df(df, window):
+#     arr = df.to_numpy()
+#     T, N = arr.shape
+#     arr_T = arr.T
+#     windows = np.lib.stride_tricks.sliding_window_view(arr_T, window_shape=window, axis=1)
+#     medians = np.median(windows, axis=2)
+#     abs_dev = np.abs(windows - medians[:, :, None])
+#     mad = np.median(abs_dev, axis=2)
+#     mad = mad.T
+#     mad_full = np.full((T, N), np.nan)
+#     mad_full[window - 1:, :] = mad
+#     mad_df = pd.DataFrame(mad_full, index=df.index, columns=df.columns)
+#     return mad_df
 
-def modify_extreme_ret(ret):
-    # Modify extreme returns
-    ret = np.log1p(ret)
-    rolling_window = 12
-    rollingmedian = ret.rolling(rolling_window, min_periods=1).median()
-    rollingmad = rolling_mad_df(ret, rolling_window)
-    outlier = abs(ret-rollingmedian) > 15*rollingmad
-    ret=ret.where(~outlier, rollingmedian)
-    return np.expm1(ret)
+import numpy as np
+import pandas as pd
+
+def monotonic_tail_cleansing(df, lower_quantile=0.005, upper_quantile=0.995, scale=None):
+
+    df_clean = df.copy()
+    
+    for col in df.columns:
+        series = df[col]
+        q_low = series.quantile(lower_quantile)
+        q_high = series.quantile(upper_quantile)
+        scale_val = scale if scale is not None else (q_high - q_low) * (1- (upper_quantile - lower_quantile))
+        x = series.to_numpy()
+        x_clean = x.copy()
+        
+        mask_upper = x > q_high
+        x_clean[mask_upper] = q_high + scale_val * np.log1p((x[mask_upper] - q_high) / scale_val)        
+        mask_lower = x < q_low
+        x_clean[mask_lower] = q_low - scale_val * np.log1p((q_low - x[mask_lower]) / scale_val)
+        
+        df_clean[col] = x_clean
+    
+    return df_clean
+
 
 def get_all_ochl():
     file_path=data_path + 'all_ochl.pkl'
@@ -139,8 +154,8 @@ def transform_returns(df = None, volume_threshold = 10000):
     df = df.rename(columns={'time_rank':'date'})
     df = df.drop_duplicates(subset=['symbol', 'date'], keep='last')
     df = df.sort_values(by=['symbol', 'date'])
-    
-    df['return'] = df.groupby('symbol')['close'].pct_change()
+    df['close'] = np.log(df['close'])
+    df['return'] = df.groupby('symbol')['close'].diff()
     
     df.loc[df['volume'] < volume_threshold, 'return'] = np.nan
     
@@ -148,7 +163,7 @@ def transform_returns(df = None, volume_threshold = 10000):
     min_date = returns_df.index.min()
     max_date = returns_df.index.max()
     full_date_range = pd.date_range(start=min_date, end=max_date, freq='h')
-    returns_df = returns_df.reindex(full_date_range, fill_value=0)
+    returns_df = returns_df.reindex(full_date_range)
     return returns_df
 
 def get_all_returns(volume_threshold = 10000):
@@ -279,7 +294,7 @@ def to_sharpe(weightings, ret, th = 1, to_off = False, plot = False, return_ret 
         bps = .0046
         if to_off:
             bps = 0
-        port_ret = port_ret - bps * to
+        port_ret = port_ret - bps * to.shift(1)
         if purify and 'btc' in ret.columns:
             if plot:
                 print("Corr with BTC (before purification): ", port_ret.corr(ret['btc']))
@@ -308,3 +323,16 @@ def to_sharpe(weightings, ret, th = 1, to_off = False, plot = False, return_ret 
             print('Max Drawdown Duration: ', max_drawdown_duration, 'days')
             port_ret.cumsum().plot()
         return avg_to, sharpe, max_drawdown, max_drawdown_duration
+    
+
+def entropy(series, nbins = 20):
+    # Compute entropy of a series, normalized by the maximum entropy
+    series = series.dropna()
+    minimum = series.min()
+    maximum = series.max()
+    bins = np.linspace(minimum-0.0001, maximum+0.0001, nbins)
+    digitized = np.digitize(series, bins)
+    counts = np.bincount(digitized)[1:]
+    probabilities = counts / len(series)
+    entropy = -np.sum(probabilities * np.log(probabilities, where = probabilities > 0))
+    return entropy/np.log(nbins)
