@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 import os
 import numpy as np
 load_dotenv()
-data_path = '../Data/'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_path = os.path.join(current_dir, '..\\Data\\')
 COINGECKO_API = os.getenv("COINGECKO_API_KEY")
 KRAKEN_API = os.getenv('KRAKEN_API_KEY')
 HEADERS = {"x-cg-pro-api-key": COINGECKO_API,
