@@ -2,3 +2,6 @@
 *.pkl
 __pycache__/
 *.db
+./Data/
+*.csv
+*.zip
